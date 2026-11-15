@@ -52,9 +52,19 @@ except Exception:                           # noqa: BLE001
     online = None
 
 # ==================== 配置(按需修改) ====================
-PHONE_NAME = "Mate 20"                      # 「此电脑」里显示的手机名
+DEFAULT_PHONE_NAME = "Mate 20"              # 作者机型；仅作初始兜底，匹配不到会自动探测
+PHONE_NAME = DEFAULT_PHONE_NAME             # 运行时会更新为真实设备名
+LAST_PHONE_FILE = "_last_phone.txt"         # 记住上次成功识别的设备名，避免每次启动深遍历 MTP
 VOLUMES = ["内部存储", "存储卡"]             # 手机上的两个存储位置
 APP_PATH = ["Android", "data", "bubei.tingshu", "files", "down"]
+
+# 不同品牌/系统对存储卷的叫法不同，按候选名依次精确匹配
+VOLUME_ALIASES = {
+    "内部存储": ("内部存储", "内部存储设备", "内部存储空间", "内部共享存储",
+             "Internal shared storage", "Internal storage", "本机存储", "手机存储"),
+    "存储卡": ("存储卡", "SD卡", "SD 卡", "SD card", "SD Card",
+            "外置存储", "外部存储", "Portable storage"),
+}
 EXE_NAME = "懒人听书音频批量转换.exe"
 HELP_NAME = "使用说明.txt"
 ICON_NAME = "图标.ico"
@@ -92,9 +102,76 @@ DIALOG_TITLE = "选择文件夹"                  # 转换工具弹出的对话�
 COPY_TIMEOUT = 1800                         # 单文件复制超时(秒)
 COPY_WINDOW = 8                             # 同时投递的复制任务数(并行提速)
 CONVERT_TIMEOUT = 4 * 3600                  # 单本转换超时(秒)
-OUTPUT_FORMAT = "mp3"                       # "mp3"=转码为真MP3; "auto"=保持工具原始输出(MP4)
-MP3_BITRATE = "96k"                         # MP3 码率(有声书 96k 足够)
+OUTPUT_FORMAT = "mp3"                       # "mp3"=转码为真MP3; "auto"=保持工具原始输出(MP4/AAC, 不转码)
+MP3_BITRATE = "96k"                         # 发行版固定 96k CBR(免费标准档源够用, 保留 ID3)
+MP3_VBR_QUALITY = None                      # None=按 MP3_BITRATE 走 CBR; "4"/"5"=LAME VBR 质量等级
 TRANSCODE_WORKERS = 6                       # 并行转码进程数
+
+# ── 音质档位(发行版: 免费标准源-96k优化) ────────────────────────────
+# 用户最终只保留「LRTS-to-mp3(免费源-96k优化).exe」这一个版本, 故源码默认
+# 与之完全对齐: 内置固定 96k CBR + 防上转(检测到 48k 级源自动降到 64k),
+# 且不读「音质.txt」, 避免以后重新打包又变回 128k 高清版。
+# 代码仍保留切档能力, 日后若需要: 把 ALLOW_QUALITY_FILE 改回 True, 在 exe
+# 同目录放「音质.txt」, 第一行写下列任一值即可, 无需改其它代码:
+#   64k / 96k / 128k / 192k / 320k  → 固定码率 CBR
+#   vbr2 / vbr4 / vbr5 / vbr6 / vbr7 → LAME VBR(按内容自动分配码率)
+# 注: "不转码、原样保留源文件" 请在界面「输出格式」下拉框里选 auto。
+QUALITY_FILE = os.path.join(APP_DIR, "音质.txt")
+QUALITY_DEFAULT = "96k"         # 发行版固定档位
+ALLOW_QUALITY_FILE = False      # 发行版内置固定, 忽略同目录 音质.txt
+SKIP_UPTRANSCODE = True         # 源明显偏低时降到 64k, 不做无谓上转
+LOW_SOURCE_BITRATE = "64k"      # 防上转时改用的码率
+QUALITY_VALID_CBR = ("64k", "96k", "128k", "192k", "320k")
+QUALITY_VALID_VBR = ("vbr2", "vbr4", "vbr5", "vbr6", "vbr7")
+QUALITY_SOURCE = "默认"
+
+
+def load_quality_setting():
+    """读取软件目录「音质.txt」覆盖音质档位, 返回当前档位描述。
+
+    极其保守: 任何异常/未知值都静默回退默认, 绝不让配置文件影响转换流程。
+    """
+    global MP3_BITRATE, MP3_VBR_QUALITY, QUALITY_SOURCE
+    raw = ""
+    if ALLOW_QUALITY_FILE:
+        try:
+            with open(QUALITY_FILE, "r", encoding="utf-8-sig") as fh:
+                for line in fh:
+                    s = line.strip()
+                    if s and not s.startswith("#"):
+                        raw = s.lower().replace(" ", "")
+                        break
+        except (OSError, UnicodeError):
+            raw = ""
+    if not raw:
+        raw = QUALITY_DEFAULT
+        QUALITY_SOURCE = ("内置固定档位" if not ALLOW_QUALITY_FILE
+                          else "默认(软件目录无 音质.txt)")
+    else:
+        QUALITY_SOURCE = "音质.txt"
+    if raw in QUALITY_VALID_VBR:
+        MP3_VBR_QUALITY = raw[3:]
+        MP3_BITRATE = QUALITY_DEFAULT      # 仅作标称值; 实际编码走 -q:a
+        QUALITY_SOURCE += " → VBR -q:a " + MP3_VBR_QUALITY
+    elif raw in QUALITY_VALID_CBR:
+        MP3_BITRATE = raw
+        MP3_VBR_QUALITY = None
+        QUALITY_SOURCE += " → CBR " + raw
+    else:
+        MP3_BITRATE = QUALITY_DEFAULT
+        MP3_VBR_QUALITY = None
+        QUALITY_SOURCE = "默认(音质.txt 内容无法识别: {!r})".format(raw)
+    return quality_label()
+
+
+def quality_label():
+    """当前生效音质的人类可读描述(自检报告用)。"""
+    if MP3_VBR_QUALITY:
+        return "VBR -q:a {}".format(MP3_VBR_QUALITY)
+    return "CBR {}".format(MP3_BITRATE)
+
+
+load_quality_setting()
 def find_help_file():
     """定位《使用说明.txt》: 优先软件目录(用户可自行修改), 其次内嵌资源。"""
     for p in (os.path.join(APP_DIR, HELP_NAME),
@@ -165,24 +242,194 @@ def find_item(folder, name):
     return None
 
 
+def find_item_any(folder, names):
+    """按候选名依次精确匹配，返回 (item, 命中的名字)。"""
+    try:
+        items = list(folder.Items())
+    except Exception:
+        return None, None
+    for name in names:
+        for it in items:
+            if it.Name == name:
+                return it, name
+    return None, None
+
+
+def portable_candidates(pc):
+    """「此电脑」顶层里疑似便携设备(MTP)的文件夹项。
+
+    本地磁盘的 Path 形如 C:\\，MTP 设备通常是 ::{GUID}\\... 形式的 Shell 路径。
+    """
+    out = []
+    for it in pc.Items():
+        try:
+            if not it.IsFolder:
+                continue
+            # 以盘符开头的一律视为本地/映射磁盘；MTP 设备是 Shell 命名空间路径
+            if re.match(r"^[A-Za-z]:", (it.Path or "").strip()):
+                continue
+            out.append(it)
+        except Exception:
+            continue
+    return out
+
+
+def find_down_anywhere(folder):
+    """遍历设备下的顶层文件夹，找含懒人听书缓存目录的那个（不依赖卷名）。"""
+    try:
+        tops = list(folder.Items())
+    except Exception:
+        return None
+    for it in tops:
+        try:
+            if not it.IsFolder:
+                continue
+            d = it.GetFolder
+        except Exception:
+            continue
+        for p in APP_PATH:
+            nxt = find_item(d, p)
+            if nxt is None:
+                break
+            d = nxt.GetFolder
+        else:
+            return d
+    return None
+
+
+def has_lrts_cache(folder):
+    """该设备下能否定位到 Android/data/bubei.tingshu/files/down。"""
+    return find_down_anywhere(folder) is not None
+
+
 def list_files(folder):
     return [x for x in folder.Items() if not x.IsFolder]
 
 
-def connect_phone():
-    """连接手机, 返回 (shell, phone_folder)；失败返回 (None, None)。"""
-    shell = win32com.client.Dispatch("Shell.Application")
-    pc = shell.NameSpace(17)  # 此电脑
-    phone = find_item(pc, PHONE_NAME)
-    if phone is None:
-        return None, None
-    return shell, phone.GetFolder
+# 「此电脑」里的虚拟文件夹 / 网盘挂载点，不是手机，不能当候选设备
+_VIRTUAL_KEYWORDS = ("网盘", "云盘", "下载", "迅雷", "3D", "对象", "图片",
+                     "音乐", "桌面", "文档", "视频", "WPS", "OneDrive",
+                     "此电脑", "回收站", "控制面板", "网络", "iCloud")
+
+LAST_SCAN_INFO = ""            # 最近一次连接尝试的过程, 供诊断报告/GUI 日志使用
+
+
+def _load_last_phone():
+    """读取上次成功识别的设备名；换手机/重插 USB 后匹配不上会自动重新探测。"""
+    try:
+        with open(os.path.join(APP_DIR, LAST_PHONE_FILE), "r", encoding="utf-8") as fh:
+            return fh.read().strip() or None
+    except Exception:
+        return None
+
+
+def _save_last_phone(name):
+    try:
+        with open(os.path.join(APP_DIR, LAST_PHONE_FILE), "w", encoding="utf-8") as fh:
+            fh.write(str(name))
+    except Exception:
+        pass
+
+
+def _looks_like_mtp(it):
+    """按 Shell 命名空间路径判断是否为 WPD/MTP 便携设备。"""
+    try:
+        p = (it.Path or "").lower()
+    except Exception:
+        return False
+    return any(k in p for k in ("usb#vid", "\\?\\usb", "wpdbusenum",
+                                "portabledevice", "#{6ac27878"))
+
+
+def connect_phone(retries=3, delay=0.9, on_retry=None):
+    """连接手机, 返回 (shell, phone_folder)；失败返回 (None, None)。
+
+    优先精确匹配记住的设备名 → 按 WPD 路径特征挑便携设备 → 唯一非虚拟候选。
+    连接阶段**只做「此电脑」顶层枚举，绝不深遍历 MTP 目录**：每层 Items()
+    都是跨进程 COM 调用，慢且会反复唤醒设备；MTP 会话不稳时这会让设备
+    不停「刷新」、连接时好时坏。缓存目录能否读取留到 get_down_folder()
+    判断并给出明确报错。设备刚插上时枚举会延迟，故失败时重试若干次。
+    """
+    global PHONE_NAME, LAST_SCAN_INFO
+    preferred = PHONE_NAME
+    if preferred == DEFAULT_PHONE_NAME:
+        preferred = _load_last_phone() or preferred
+    trace = []
+
+    def found(shell, item, how, attempt):
+        global PHONE_NAME, LAST_SCAN_INFO
+        PHONE_NAME = item.Name
+        _save_last_phone(item.Name)
+        LAST_SCAN_INFO = "第{}次枚举: {}".format(attempt, how)
+        return shell, item.GetFolder
+
+    for attempt in range(1, retries + 1):
+        if attempt > 1 and on_retry:
+            try:
+                on_retry(attempt, retries)
+            except Exception:
+                pass
+        try:
+            shell = win32com.client.Dispatch("Shell.Application")
+            pc = shell.NameSpace(17)  # 此电脑
+            items = list(pc.Items())
+
+            phone = find_item(pc, preferred)
+            if phone is not None:
+                PHONE_NAME = preferred    # 记住名精确命中后也更新显示, 避免顶栏还写 Mate 20
+                LAST_SCAN_INFO = "第{}次枚举: 精确命中 {}".format(attempt, preferred)
+                return shell, phone.GetFolder
+
+            cands = portable_candidates(pc)
+            # 只在顶层挑设备，不递归进 MTP 目录（避免反复唤醒设备）
+            mtp = [c for c in cands if _looks_like_mtp(c)]
+            plain = [c for c in cands
+                     if c not in mtp
+                     and not any(k in str(c.Name) for k in _VIRTUAL_KEYWORDS)]
+            trace.append("第{}次: 顶层{}项, MTP候选{}, 其它候选{}".format(
+                attempt, len(items), [str(c.Name) for c in mtp],
+                [str(c.Name) for c in plain]))
+
+            # 1) 只有多台 MTP 设备时才深遍历挑有缓存的那台（单台直接选，
+            #    避免为了筛选而反复唤醒设备）
+            if len(mtp) > 1:
+                for c in mtp:
+                    try:
+                        if has_lrts_cache(c.GetFolder):
+                            return found(shell, c,
+                                         "按缓存目录命中 {}".format(c.Name), attempt)
+                    except Exception:
+                        continue
+            # 2) 多台时优先上次记住的那台
+            for c in mtp:
+                if str(c.Name) == str(preferred):
+                    return found(shell, c, "记住的设备 {}".format(c.Name), attempt)
+            if mtp:
+                return found(shell, mtp[0],
+                             "按 MTP 路径命中 {}".format(mtp[0].Name), attempt)
+            # 2) 兜底: 排除虚拟文件夹后恰好只剩一个候选
+            if len(plain) == 1:
+                return found(shell, plain[0],
+                             "唯一候选 {}".format(plain[0].Name), attempt)
+        except Exception as e:                            # noqa: BLE001
+            trace.append("第{}次: COM 异常 {}".format(attempt, repr(e)))
+        if attempt < retries:
+            time.sleep(delay)
+
+    LAST_SCAN_INFO = "已重试{}次仍未发现设备；{}".format(
+        retries, "；".join(trace))
+    return None, None
 
 
 def get_down_folder(ph, vol):
     """定位某个存储位置的懒人听书缓存目录, 返回 (folder, 错误信息)。"""
-    it = find_item(ph, vol)
+    it, _ = find_item_any(ph, VOLUME_ALIASES.get(vol, (vol,)))
     if it is None:
+        # 卷名都不认识时，主存储退回「遍历所有目录找缓存」，避免机型差异
+        if vol == VOLUMES[0]:
+            d = find_down_anywhere(ph)
+            if d is not None:
+                return d, None
         return None, "手机上未找到存储位置: " + vol
     d = it.GetFolder
     for p in APP_PATH:
@@ -690,6 +937,16 @@ def find_children(hwnd, cls=None, text=None):
     return res
 
 
+def _decode_tool_log(data):
+    """转换工具是中文 Windows 程序, stdout 通常是 GBK; 同时兼容 UTF-8。"""
+    for enc in ("utf-8", "gbk"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("gbk", "replace")
+
+
 def run_converter(folder_path):
     """驱动转换工具处理 folder_path, 返回 (returncode, 完整日志文本)。"""
     exe = ensure_converter()
@@ -731,7 +988,7 @@ def run_converter(folder_path):
                     fh.seek(pos)
                     chunk = fh.read(size - pos)
                 pos = size
-                log("      " + chunk.decode("utf-8", "replace").rstrip("\r\n"))
+                log("      " + _decode_tool_log(chunk).rstrip("\r\n"))
             if time.time() - t0 > CONVERT_TIMEOUT:
                 pr.kill()
                 raise RuntimeError("转换超时(超过 {:.0f} 小时)".format(CONVERT_TIMEOUT / 3600))
@@ -741,14 +998,14 @@ def run_converter(folder_path):
             if size > pos:
                 with open(log_path, "rb") as fh:
                     fh.seek(pos)
-                    tail = fh.read(size - pos).decode("utf-8", "replace")
+                    tail = _decode_tool_log(fh.read(size - pos))
                 log("      " + tail.rstrip("\r\n"))
         except OSError:
             pass
     finally:
         logf.close()
     with open(log_path, "rb") as fh:
-        return pr.returncode, fh.read().decode("utf-8", "replace")
+        return pr.returncode, _decode_tool_log(fh.read())
 
 
 def converter_available():
@@ -866,13 +1123,17 @@ class TranscodeControl:
             self._terminate(p)
 
 
-def transcode_to_mp3(src, dst, ffmpeg, tags=None, control=None):
-    """把音频文件转码为 MP3(默认 96k), 可写入 ID3 标签。成功返回 True。
+def transcode_to_mp3(src, dst, ffmpeg, tags=None, control=None,
+                     bitrate_override=None):
+    """把音频文件转码为 MP3, 可写入 ID3 标签。成功返回 True。
 
     control: TranscodeControl, 传入后支持转码中途取消(立即终止该 ffmpeg 进程)。
+    bitrate_override: 免费源优化时按源文件实际码率下调本次 CBR 码率。
     """
+    enc = (["-q:a", MP3_VBR_QUALITY] if MP3_VBR_QUALITY
+           else ["-b:a", bitrate_override or MP3_BITRATE])
     cmd = [ffmpeg, "-y", "-loglevel", "error", "-i", src, "-vn",
-           "-c:a", "libmp3lame", "-b:a", MP3_BITRATE, "-id3v2_version", "3"]
+           "-c:a", "libmp3lame"] + enc + ["-id3v2_version", "3"]
     for k, v in (tags or {}).items():
         if v:
             cmd += ["-metadata", "{}={}".format(k, v)]
@@ -939,6 +1200,51 @@ def mp3_cbr_duration(path, bitrate_bps=None):
     return (size - off) * 8 / bitrate_bps
 
 
+def mp3_xing_info(path):
+    """解析第一帧的 Xing/Info 头; 成功返回含 duration/bytes/frames 的字典。
+
+    MPEG1 Layer3 每帧 1152 采样; Xing/Info 头紧跟第一帧的 side info:
+    相对帧头起点, 单声道 +21 字节, 立体声 +36 字节。CBR 文件也可能带
+    Info 头。LAME 通常同时写入 Frames(0x1) 与 Bytes(0x2) 字段。
+    """
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(10)
+            off = 0
+            if head[:3] == b"ID3":
+                off = ((head[6] & 0x7F) << 21 | (head[7] & 0x7F) << 14 |
+                       (head[8] & 0x7F) << 7 | (head[9] & 0x7F)) + 10
+            fh.seek(off)
+            h = fh.read(4)
+        if len(h) < 4 or h[0] != 0xFF or (h[1] & 0xE0) != 0xE0:
+            return None
+        if ((h[1] >> 3) & 0x03) != 3 or ((h[1] >> 1) & 0x03) != 1:
+            return None                       # 只处理 MPEG1 Layer3
+        sample_rate = (44100, 48000, 32000)[(h[2] >> 2) & 0x03]
+        xing_off = 21 if ((h[3] >> 6) & 0x03) == 3 else 36   # 3 = 单声道
+        with open(path, "rb") as fh:
+            fh.seek(off + xing_off)
+            if fh.read(4) not in (b"Xing", b"Info"):
+                return None
+            flags = int.from_bytes(fh.read(4), "big")
+            frames = (int.from_bytes(fh.read(4), "big")
+                      if flags & 0x01 else None)
+            nbytes = (int.from_bytes(fh.read(4), "big")
+                      if flags & 0x02 else None)
+        if not frames or frames <= 0:
+            return None
+        return {"duration": frames * 1152 / sample_rate,
+                "bytes": nbytes, "frames": frames, "id3_size": off}
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def mp3_duration(path):
+    """MP3 时长: 优先 Xing/Info 头(对 VBR 同样准确), 失败再退回帧头码率估算。"""
+    info = mp3_xing_info(path)
+    return info["duration"] if info else mp3_cbr_duration(path)
+
+
 def mp4_duration(path):
     """从 MP4 的 mvhd box 读出时长(秒)。失败返回 None。"""
     try:
@@ -969,21 +1275,59 @@ def mp4_duration(path):
     return None
 
 
+def source_bitrate(path):
+    """估算源文件平均码率(bps); 无法判定返回 None。用于防上转判断。"""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return None
+    ext = detect_audio_ext(path)
+    dur = mp4_duration(path) if ext == ".mp4" else mp3_duration(path)
+    if not dur or dur <= 0:
+        return None
+    return size * 8 / dur
+
+
+def effective_bitrate_for(src):
+    """免费源优化: 源平均码率明显低于目标时降到 LOW_SOURCE_BITRATE。
+
+    避免把 48k 的免费源硬上转成 96k —— 那样文件大一倍却换不来任何细节。
+    返回 None 表示沿用默认档位; 测不出源码率时一律不动, 保证稳妥。
+    """
+    if not SKIP_UPTRANSCODE or MP3_VBR_QUALITY:
+        return None
+    try:
+        target = int(str(MP3_BITRATE).lower().rstrip("k")) * 1000
+    except ValueError:
+        return None
+    sbr = source_bitrate(src)
+    if not sbr or sbr >= target * 0.8:
+        return None
+    return LOW_SOURCE_BITRATE
+
+
 def tmp_is_complete(tmp_path, src_path, tol=5.0):
     """判断 .__tmp.mp3 是否是"完整"的转码成果(时长与源文件一致)。
 
     返回 False 时调用方必须丢弃它并重新转码 —— 宁可重转一遍, 也绝不能让
     被中断的残次品覆盖掉完好的源文件(会丢后半段音频)。
     """
-    try:
-        br = int(str(MP3_BITRATE).lower().rstrip("k")) * 1000
-    except ValueError:
-        br = None
-    d_tmp = mp3_cbr_duration(tmp_path, br)
+    # 用 Xing/Info 头的真实帧数算时长, 不再假设 CBR —— VBR 档位下同样准确
+    d_tmp = mp3_duration(tmp_path)
     if d_tmp is None:
         return False
+    # 帧数是编码时写定的, 文件被截断后不会变; 必须再用它声明的总字节数
+    # 与实际大小交叉校验, 否则被中断的残次品会被误判为完整并覆盖好文件。
+    info = mp3_xing_info(tmp_path)
+    if info and info["bytes"]:
+        try:
+            actual = os.path.getsize(tmp_path) - info["id3_size"]
+        except OSError:
+            return False
+        if actual < info["bytes"] * 0.98:
+            return False
     d_src = mp4_duration(src_path) if detect_audio_ext(src_path) == ".mp4" \
-        else mp3_cbr_duration(src_path)
+        else mp3_duration(src_path)
     if d_src is None:
         return False
     return abs(d_tmp - d_src) <= tol
@@ -1032,11 +1376,14 @@ def transcode_in_place(workdir, novel=None, author=None, announcer=None,
     """
     ffmpeg = find_ffmpeg() if OUTPUT_FORMAT == "mp3" else None
     stat = {"ok": 0, "kept": 0, "dup": 0, "fail": 0, "swapfail": 0,
-            "cancelled": 0, "total": 0, "skipped": 0}
+            "cancelled": 0, "total": 0, "skipped": 0, "bad": 0}
     try:
         ep_range = norm_ep_range(ep_range)
     except ValueError:
         ep_range = None
+    # 先体检: 把解密未成功、却顶着 .mp3 后缀的加密缓存隔离出去。
+    # 否则它会被当成成品保留, 且占住同名位置让下次运行永远修不好。
+    stat["bad"] = quarantine_bad_audio(workdir)
     todo = []
     for f in sorted(os.listdir(workdir)):
         if f.startswith("."):
@@ -1070,7 +1417,16 @@ def transcode_in_place(workdir, novel=None, author=None, announcer=None,
                 log("      恢复失败 {}: {!r}".format(f, e))
             continue
         stem, ext = os.path.splitext(f)
-        real = detect_audio_ext(src) or ext.lower() or ".mp4"
+        probed = detect_audio_ext(src)
+        if probed is None and ext.lower() == ".mp3":
+            # 后缀是 .mp3 但内容不是任何已知音频格式: 绝不能算「已是 MP3」。
+            # 正常情况下 quarantine_bad_audio() 已把它移走, 这里是二次保险。
+            stat["bad"] += 1
+            stat["fail"] += 1
+            log("      [跳过] {} 不是可播放音频(疑似未解密), 不产出假 MP3".format(f))
+            continue
+        real = probed or (ext.lower() if ext.lower() in AUDIO_SUFFIXES else None) \
+            or ".mp4"
         if OUTPUT_FORMAT != "mp3" or real == ".mp3":
             if ext.lower() != real:        # 扩展名与实际格式不符 -> 改正
                 try:
@@ -1106,7 +1462,11 @@ def transcode_in_place(workdir, novel=None, author=None, announcer=None,
         # 开工前先看暂停/取消: 取消 -> 放弃; 暂停 -> 在此挂起直到「继续」
         if control is not None and not control.wait_if_paused():
             return "cancelled"
-        if not transcode_to_mp3(src, tmp, ffmpeg, tags, control):
+        low_br = effective_bitrate_for(src)
+        if low_br:
+            log("      源为低码率, 本次按 {} 转码(避免上转浪费)".format(low_br))
+        if not transcode_to_mp3(src, tmp, ffmpeg, tags, control,
+                                bitrate_override=low_br):
             if control is not None and control.cancelled:
                 return "cancelled"
             return "fail"
@@ -1201,7 +1561,10 @@ def transcode_in_place(workdir, novel=None, author=None, announcer=None,
 
 
 def detect_audio_ext(path):
-    """探测真实音频格式(转换工具有时扩展名与实际容器不符)。"""
+    """探测真实音频格式(转换工具有时扩展名与实际容器不符)。
+
+    返回 None 表示「不是任何已知音频格式」—— 通常是解密没成功的加密缓存。
+    """
     try:
         with open(path, "rb") as fh:
             head = fh.read(16)
@@ -1213,7 +1576,58 @@ def detect_audio_ext(path):
         return ".mp3"
     if len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0:
         return ".mp3"
+    # 其它合法音频容器: 交给 ffmpeg 转码, 不要误当成「解密失败」
+    if len(head) >= 12 and head[:4] == b"RIFF" and head[8:12] == b"WAVE":
+        return ".wav"
+    if head[:4] == b"fLaC":
+        return ".flac"
+    if head[:4] == b"OggS":
+        return ".ogg"
     return None
+
+
+AUDIO_SUFFIXES = (".mp3", ".mp4", ".m4a", ".aac", ".wav", ".flac", ".ogg")
+
+
+def quarantine_bad_audio(workdir):
+    """把「后缀是音频、内容却不是任何已知音频格式」的文件移到备份目录。
+
+    这类文件基本都是解密工具没解开的加密缓存(常见于收费高清档)。旧逻辑
+    会因为后缀是 .mp3 就认定「已是真 MP3」直接保留, 产出播放不了的假成品;
+    而且它占着同名位置, 下次运行复制阶段会跳过、解密工具也不会覆盖, 导致
+    反复重跑都修不好。移走后既能重新走完整流程, 原始数据也完整保留。
+
+    只移动、绝不删除。返回移动数量。
+    """
+    moved = 0
+    dest_dir = os.path.join(WORKSPACE, "_未解密备份",
+                            os.path.basename(os.path.normpath(workdir)))
+    try:
+        names = os.listdir(workdir)
+    except OSError:
+        return 0
+    for f in names:
+        if f.startswith(".") or not f.lower().endswith(AUDIO_SUFFIXES):
+            continue
+        p = os.path.join(workdir, f)
+        if not os.path.isfile(p) or detect_audio_ext(p):
+            continue
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+            target = os.path.join(dest_dir, f)
+            if os.path.exists(target):
+                target = os.path.join(dest_dir, "{}_{}".format(int(time.time()), f))
+            os.replace(p, target)
+            moved += 1
+            log("      [隔离] {} 不是可播放音频(疑似未解密), 已移到 {}".format(
+                f, dest_dir))
+        except OSError as e:
+            log("      [警告] 无法隔离 {} : {!r}".format(f, e))
+    if moved:
+        log("    ⚠ {} 个文件疑似解密未成功, 已隔离备份(未删除)。".format(moved)
+            + "重新运行本程序会从手机重新复制并解密; "
+            + "若同一批文件再次被隔离, 说明该下载档位的加密方式转换工具不支持。")
+    return moved
 
 
 def process_novel(name, sources, limit=None, info=None, delete_after=False,
@@ -1232,7 +1646,8 @@ def process_novel(name, sources, limit=None, info=None, delete_after=False,
     stat = {"name": name, "copied": 0, "skipped": 0, "converted": 0,
             "mp3": 0, "kept": 0, "dup": 0, "failed_files": 0,
             "out_total": 0, "deleted": 0, "delete_fail": 0,
-            "cancelled": 0, "error": None, "ep_range": None, "range_skipped": 0}
+            "cancelled": 0, "error": None, "ep_range": None,
+            "range_skipped": 0, "bad_files": 0}
     try:
         stat["ep_range"] = norm_ep_range(ep_range)
     except ValueError as e:
@@ -1321,11 +1736,17 @@ def process_novel(name, sources, limit=None, info=None, delete_after=False,
     stat["mp3"], stat["kept"] = ts["ok"], ts["kept"]
     stat["dup"], stat["failed_files"] = ts["dup"], ts["fail"]
     stat["cancelled"] = ts.get("cancelled", 0)
+    stat["bad_files"] = ts.get("bad", 0)
     stat["out_total"] = len([x for x in os.listdir(workdir)
                              if not x.startswith(".")
                              and x.lower().endswith((".mp3", ".mp4", ".m4a"))])
     log("    MP3 输出：新转码 {} 个，原已是 MP3 {} 个，去重清理 {} 个，失败 {} 个"
         .format(ts["ok"], ts["kept"], ts["dup"], ts["fail"]))
+    if stat["bad_files"]:
+        log("    ⚠ {} 个文件解密未成功(内容不是音频)，已移到 workspace\\_未解密备份\\，"
+            "未删除。请重新运行本程序让它从手机重新复制解密；"
+            "若同一批文件反复被隔离，说明转换工具不支持该下载档位。"
+            .format(stat["bad_files"]))
     log("    输出目录：{}（共 {} 个音频）".format(workdir, stat["out_total"]))
 
     # ---------- 可选: 删除手机端缓存 ----------

@@ -528,7 +528,8 @@ class App:
         self.phone_var.set("手机: 正在连接 …")
         self.status_var.set("正在扫描手机缓存 …")
         self._clear_log()
-        self.post_log("正在连接手机 {} …".format(core.PHONE_NAME))
+        self.post_log("正在连接手机 {} …（设备未就绪时最多自动重试 3 次）"
+                     .format(core.PHONE_NAME))
         threading.Thread(target=self._scan_worker, daemon=True).start()
 
     def _scan_worker(self):
@@ -548,12 +549,15 @@ class App:
 
     def _scan_impl(self):
         try:
-            _, ph = core.connect_phone()
+            _, ph = core.connect_phone(on_retry=lambda a, n: self.msgq.put(
+                ("status", "正在连接手机…（第 {}/{} 次尝试）".format(a, n))))
             if ph is None:
                 self.msgq.put(("phone", "手机: 未检测到 {}".format(core.PHONE_NAME)))
-                self.msgq.put(("log", "[错误] 未检测到手机「{}」。请用 USB 线连接，"
-                                      "在手机上选择「传输文件」模式后点「刷新列表」。"
-                              .format(core.PHONE_NAME)))
+                self.msgq.put(("log", "[错误] 未检测到手机「{}」。已自动重试 3 次；"
+                                      "请确认手机已解锁、USB 用途切到「传输文件(MTP)」，"
+                                      "再点「刷新列表」。".format(core.PHONE_NAME)))
+                self.msgq.put(("log", "[诊断] " +
+                              getattr(core, "LAST_SCAN_INFO", "")))
                 self.msgq.put(("status", "手机未连接"))
                 self.msgq.put(("scan_abort",))
                 return
@@ -577,6 +581,11 @@ class App:
                     n = core.count_cached_files(item)
                     self.msgq.put(("count", vol, name, n))
 
+            if sum(len(v) for v in volumes.values()) == 0:
+                self.msgq.put(("log", "[提示] 设备已连上，但没读到任何缓存目录。"
+                                      "常见原因：手机锁屏、USB 未选「传输文件」，"
+                                      "或 Android 11+ 通过 MTP 隐藏了 Android/data。"
+                                      "请解锁手机、重新插拔后再点「刷新列表」。"))
             self.msgq.put(("log", "扫描完成。点击列表中的行即可勾选／取消。"))
             self.msgq.put(("scan_done",))
         except Exception:
@@ -1182,6 +1191,13 @@ def selftest():
     except Exception as e:                                   # noqa: BLE001
         add("ensure_converter()", "异常 {!r}".format(e))
     lines.append("-" * 62)
+    add("输出格式 OUTPUT_FORMAT", core.OUTPUT_FORMAT)
+    add("音质档位(生效值)", core.quality_label())
+    add("  档位来源", core.QUALITY_SOURCE)
+    add("  配置文件", core.QUALITY_FILE)
+    add("  可切换档位", "是(音质.txt)" if core.ALLOW_QUALITY_FILE else "否(内置固定)")
+    add("  防上转优化", "开" if core.SKIP_UPTRANSCODE else "关")
+    add("MP3_BITRATE(标称)", core.MP3_BITRATE)
     add("ffmpeg", core.find_ffmpeg() or "× 未找到")
     for p in core.FFMPEG_CANDIDATES:
         add("  候选", "{} {}".format("√" if os.path.exists(p) else "×", p))
@@ -1212,6 +1228,67 @@ def selftest():
     return out
 
 
+def probe_phone():
+    """手机连接诊断: 枚举「此电脑」并复现 connect_phone(), 结果写入软件目录。"""
+    import datetime
+    lines = []
+
+    def add(k, v):
+        lines.append("{:<24} {}".format(k, v))
+
+    lines.append("LRTS to mp3 —— 手机连接诊断")
+    lines.append("时间: " + datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    lines.append("=" * 62)
+    add("软件目录 APP_DIR", core.APP_DIR)
+    add("输出格式 OUTPUT_FORMAT", core.OUTPUT_FORMAT)
+    add("音质档位", core.quality_label())
+    add("MP3_BITRATE(标称)", core.MP3_BITRATE)
+    add("防上转优化", "开" if core.SKIP_UPTRANSCODE else "关")
+    lines.append("-" * 62)
+    try:
+        import win32com.client
+        sh = win32com.client.Dispatch("Shell.Application")
+        pc = sh.NameSpace(17)
+        items = list(pc.Items())
+        add("此电脑 顶层项数", len(items))
+        for it in items:
+            try:
+                add("  " + str(it.Name)[:18],
+                    str(it.Path)[:78] + " Folder=" + str(it.IsFolder))
+            except Exception as e:                       # noqa: BLE001
+                add("  项读取失败", repr(e))
+    except Exception as e:                               # noqa: BLE001
+        add("Shell COM 失败", repr(e))
+        lines.append(traceback.format_exc())
+    lines.append("-" * 62)
+    try:
+        _s, ph = core.connect_phone()
+        add("识别到设备名", core.PHONE_NAME)
+        add("connect_phone()", "已连接" if ph is not None else "未连接")
+        add("扫描过程", getattr(core, "LAST_SCAN_INFO", ""))
+        if ph is not None:
+            add("缓存目录存在?", core.has_lrts_cache(ph))
+            for vol in core.VOLUMES:
+                try:
+                    d, err = core.get_down_folder(ph, vol)
+                    add("  卷 " + vol, "√ 可达" if d is not None else "× " + str(err))
+                except Exception as e:                   # noqa: BLE001
+                    add("  卷 " + vol, "异常 " + repr(e))
+    except Exception as e:                               # noqa: BLE001
+        add("connect_phone 异常", repr(e))
+        lines.append(traceback.format_exc())
+    lines.append("=" * 62)
+    text = "\n".join(lines)
+    out = os.path.join(core.APP_DIR, "_phone_probe.txt")
+    try:
+        with open(out, "w", encoding="utf-8") as fh:
+            fh.write(text + "\n")
+    except Exception:                                    # noqa: BLE001
+        pass
+    print(text, flush=True)
+    return out
+
+
 def main():
     enable_dpi_awareness()
     root = tk.Tk()
@@ -1236,5 +1313,7 @@ def main():
 if __name__ == "__main__":
     if "--selftest" in sys.argv:          # 环境自检(打包后排查用)
         selftest()
+    elif "--probe-phone" in sys.argv:     # 手机连接诊断(打包后排查用)
+        probe_phone()
     else:
         main()

@@ -28,6 +28,12 @@ tools/*
 online_cache.json
 _convert_log.txt
 _selftest.txt
+_selftest_*.txt
+_phone_probe*.txt
+# 记住的上次成功识别设备名，各人不同
+_last_phone.txt
+# 本机音质档位配置(若启用)
+音质.txt
 *.log
 
 # ---------- 临时文件 ----------

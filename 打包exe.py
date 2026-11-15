@@ -24,7 +24,7 @@ import sys
 import time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-PY = r"C:\ProgramData\anaconda3\python.exe"      # 必须是有 tkinter+pywin32 的那个
+PY = sys.executable        # 当前 Python（需有 tkinter + pywin32 + PyInstaller）
 APP_NAME = "LRTS to mp3"
 ENTRY = os.path.join(ROOT, "lanren_gui.py")
 ICON = os.path.join(ROOT, "图标.ico")

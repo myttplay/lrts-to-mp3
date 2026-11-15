@@ -8,7 +8,7 @@
 
 把手机端「懒人听书」App 的加密缓存，一键解密、批量转码成可直接播放的真 MP3
 
-[![Release](https://img.shields.io/github/v/release/Popfirer/lrts-to-mp3?label=Download&color=brightgreen)](https://github.com/Popfirer/lrts-to-mp3/releases/latest)
+[![Release](https://img.shields.io/github/v/release/myttplay/lrts-to-mp3?label=Download&color=brightgreen)](https://github.com/myttplay/lrts-to-mp3/releases/latest)
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D6.svg)](#-环境要求)
 [![GUI](https://img.shields.io/badge/GUI-Tkinter-orange.svg)](#-界面功能)
@@ -29,6 +29,21 @@
 > 🎧 适用的缓存目录（脚本会自动扫描两个位置）：
 > `内部存储\Android\data\bubei.tingshu\files\down`
 > `存储卡\Android\data\bubei.tingshu\files\down`
+
+---
+
+## ✅ 当前最终版本
+
+本 fork 实际使用与维护的只有一个版本：**`LRTS-to-mp3(免费源-96k优化).exe`**
+
+| 项 | 值 |
+| :--- | :--- |
+| 输出 | 标准 `.mp3` + ID3 标签 |
+| 音质 | 内置固定 **96k CBR**；低码率源自动降到 **64k** |
+| 手机 | 自动识别 MTP 设备，记住上次成功识别的设备名 |
+| 依赖 | 同目录 `tools\ffmpeg.exe` 与缓存改名工具（不随仓库分发） |
+
+其余 exe 均为历史调试版本，已归档、不再维护。
 
 ---
 
@@ -111,7 +126,7 @@ pip install pywin32
 
 ### 方式一：使用打包好的 exe（推荐，无需 Python）
 
-**👉 [点此下载 `LRTS-to-mp3.exe`](https://github.com/Popfirer/lrts-to-mp3/releases/latest)**（约 22 MB）
+**👉 [本 fork 的 Releases 下载](https://github.com/myttplay/lrts-to-mp3/releases/latest)**
 
 1. 双击运行，界面自动打开
 2. USB 连接手机，通知栏把 USB 用途切到「传输文件(MTP)」→ 点「刷新列表」
@@ -124,8 +139,8 @@ pip install pywin32
 
 ```bat
 :: 1. 克隆仓库
-git clone https://github.com/<你的用户名>/<仓库名>.git
-cd <仓库名>
+git clone https://github.com/myttplay/lrts-to-mp3.git
+cd lrts-to-mp3
 
 :: 2. 安装依赖
 pip install pywin32
@@ -136,8 +151,8 @@ pip install pywin32
 python lanren_gui.py
 ```
 
-> 📌 `启动转换界面.bat` 里写的是本机 Python 绝对路径，**换机器请改成你自己的路径**
-> （例如 `pythonw.exe` 所在目录），或直接执行 `pythonw lanren_gui.py`。
+> 📌 `启动转换界面.bat` 通过 `pyw` 调用已安装且装有 `pywin32` 的 Python（无控制台窗口），
+> 不含任何本机绝对路径；若 `pyw` 不可用会自动回退到 `pythonw`。
 
 ---
 
